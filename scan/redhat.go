@@ -287,9 +287,20 @@ func (o *redhat) scanUnsecurePackagesUsingYumCheckUpdate() (models.VulnInfos, er
 
 	// { packageName: changelog-lines }
 	var rpm2changelog map[string]*string
-	rpm2changelog, err = o.parseAllChangelog(allChangelog)
+	rpm2changelog, err = o.divideChangelogByPackage(allChangelog)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parseAllChangelog. err: %s", err)
+	}
+
+	for name, clog := range rpm2changelog {
+		for i, p := range o.Packages {
+			n := fmt.Sprintf("%s-%s-%s",
+				p.Name, p.NewVersion, p.NewRelease)
+			if name == n {
+				o.Packages[i].Changelog = *clog
+				break
+			}
+		}
 	}
 
 	var results []PackInfoCveIDs
@@ -452,7 +463,7 @@ func (o *redhat) getChangelogCVELines(rpm2changelog map[string]*string, packInfo
 	return retLine
 }
 
-func (o *redhat) parseAllChangelog(allChangelog string) (map[string]*string, error) {
+func (o *redhat) divideChangelogByPackage(allChangelog string) (map[string]*string, error) {
 	var majorVersion int
 	var err error
 	if o.Distro.Family == "centos" {

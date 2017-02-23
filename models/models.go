@@ -466,6 +466,7 @@ type PackageInfo struct {
 	NewVersion string
 	NewRelease string
 	Repository string
+	Changelog  string
 }
 
 // ToStringCurrentVersion returns package name-version-release

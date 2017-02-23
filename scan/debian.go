@@ -447,7 +447,7 @@ func (o *debian) scanVulnInfos(upgradablePacks []models.PackageInfo, meta *cache
 				func(p models.PackageInfo) {
 					changelog := o.getChangelogCache(meta, p)
 					if 0 < len(changelog) {
-						cveIDs := o.getCveIDsFromChangelog(changelog, p.Name, p.Version)
+						_, cveIDs, _ := o.getCveIDsFromChangelog(changelog, p.Name, p.Version)
 						resChan <- struct {
 							models.PackageInfo
 							DetectedCveIDs
@@ -549,9 +549,10 @@ func (o *debian) scanPackageCveIDs(pack models.PackageInfo) ([]DetectedCveID, er
 	cmd := ""
 	switch o.Distro.Family {
 	case "ubuntu", "raspbian":
-		cmd = fmt.Sprintf(`apt-get changelog %s | grep '\(urgency\|CVE\)'`, pack.Name)
+		cmd = fmt.Sprintf(`PAGER=cat apt-get -q=2 changelog %s`, pack.Name)
 	case "debian":
-		cmd = fmt.Sprintf(`env PAGER=cat aptitude changelog %s | grep '\(urgency\|CVE\)'`, pack.Name)
+		//TODO -q option
+		cmd = fmt.Sprintf(`PAGER=cat aptitude changelog %s`, pack.Name)
 	}
 	cmd = util.PrependProxyEnv(cmd)
 
@@ -562,40 +563,54 @@ func (o *debian) scanPackageCveIDs(pack models.PackageInfo) ([]DetectedCveID, er
 		return nil, nil
 	}
 
-	if 0 < len(strings.TrimSpace(r.Stdout)) {
-		err := cache.DB.PutChangelog(o.getServerInfo().GetServerName(), pack.Name, r.Stdout)
+	stdout := strings.Replace(r.Stdout, "\r", "", -1)
+	verFound, cveIDs, changelog := o.getCveIDsFromChangelog(
+		stdout, pack.Name, pack.Version)
+
+	if 0 < len(strings.TrimSpace(changelog)) {
+		err := cache.DB.PutChangelog(o.getServerInfo().GetServerName(), pack.Name, changelog)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to put changelog into cache")
 		}
+
+		for i, p := range o.Packages {
+			if p.Name == pack.Name {
+				o.Packages[i].Changelog = changelog
+				o.Packages[i].VerFoundInChangelog = verFound
+			}
+		}
 	}
+
 	// No error will be returned. Only logging.
-	return o.getCveIDsFromChangelog(r.Stdout, pack.Name, pack.Version), nil
+	return cveIDs, nil
 }
 
 func (o *debian) getCveIDsFromChangelog(changelog string,
-	packName string, versionOrLater string) []DetectedCveID {
+	packName string, versionOrLater string) (bool, []DetectedCveID, string) {
 
-	if cveIDs, err := o.parseChangelog(changelog, packName, versionOrLater); err == nil {
-		return cveIDs
+	if cveIDs, relevantChangelog, err := o.parseChangelog(changelog, packName, versionOrLater); err == nil {
+		return true, cveIDs, relevantChangelog
 	}
 
 	ver := strings.Split(versionOrLater, "ubuntu")[0]
-	if cveIDs, err := o.parseChangelog(changelog, packName, ver); err == nil {
-		return cveIDs
+	if cveIDs, relevantChangelog, err := o.parseChangelog(changelog, packName, ver); err == nil {
+		return true, cveIDs, relevantChangelog
 	}
 
 	splittedByColon := strings.Split(versionOrLater, ":")
 	if 1 < len(splittedByColon) {
 		ver = splittedByColon[1]
 	}
-	cveIDs, err := o.parseChangelog(changelog, packName, ver)
+	cveIDs, relevantChangelog, err := o.parseChangelog(changelog, packName, ver)
 	if err == nil {
-		return cveIDs
+		return true, cveIDs, relevantChangelog
 	}
 
 	// Only logging the error.
 	o.log.Error(err)
-	return []DetectedCveID{}
+
+	// If the version is not in changelog, return entire changelog to put into cache
+	return false, []DetectedCveID{}, changelog
 }
 
 // DetectedCveID has CveID, Confidence and DetectionMethod fields
@@ -609,13 +624,13 @@ type DetectedCveID struct {
 // DetectedCveIDs is a slice of DetectedCveID
 type DetectedCveIDs []DetectedCveID
 
+var cveRe = regexp.MustCompile(`(CVE-\d{4}-\d{4,})`)
+
 // Collect CVE-IDs included in the changelog.
 // The version which specified in argument(versionOrLater) is excluded.
-func (o *debian) parseChangelog(changelog string,
-	packName string, versionOrLater string) (cves []DetectedCveID, err error) {
+func (o *debian) parseChangelog(changelog string, packName string, versionOrLater string) ([]DetectedCveID, string, error) {
 
-	cveIDs := []string{}
-	cveRe := regexp.MustCompile(`(CVE-\d{4}-\d{4,})`)
+	buf, cveIDs := []string{}, []string{}
 	stopRe := regexp.MustCompile(fmt.Sprintf(`\(%s\)`, regexp.QuoteMeta(versionOrLater)))
 	stopLineFound := false
 	lenientStopLineFound := false
@@ -626,6 +641,7 @@ func (o *debian) parseChangelog(changelog string,
 	lenientRe := regexp.MustCompile(fmt.Sprintf(`\(%s\)`, regexp.QuoteMeta(versionOrLaterlenient)))
 	lines := strings.Split(changelog, "\n")
 	for _, line := range lines {
+		buf = append(buf, line)
 		if match := stopRe.MatchString(line); match {
 			//  o.log.Debugf("Found the stop line: %s", line)
 			stopLineFound = true
@@ -640,13 +656,14 @@ func (o *debian) parseChangelog(changelog string,
 		}
 	}
 	if !stopLineFound && !lenientStopLineFound {
-		return cves, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"Failed to scan CVE IDs. The version is not in changelog. name: %s, version: %s",
 			packName,
 			versionOrLater,
 		)
 	}
 
+	cves := []DetectedCveID{}
 	for _, id := range cveIDs {
 		confidence := models.ChangelogExactMatch
 		if lenientStopLineFound {
@@ -654,7 +671,7 @@ func (o *debian) parseChangelog(changelog string,
 		}
 		cves = append(cves, DetectedCveID{id, confidence})
 	}
-	return
+	return cves, strings.Join(buf, "\n"), nil
 }
 
 func (o *debian) splitAptCachePolicy(stdout string) map[string]string {

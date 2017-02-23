@@ -460,13 +460,14 @@ func (a PackageInfosByName) Less(i, j int) bool { return a[i].Name < a[j].Name }
 
 // PackageInfo has installed packages.
 type PackageInfo struct {
-	Name       string
-	Version    string
-	Release    string
-	NewVersion string
-	NewRelease string
-	Repository string
-	Changelog  string
+	Name                string
+	Version             string
+	Release             string
+	NewVersion          string
+	NewRelease          string
+	Repository          string
+	Changelog           string
+	VerFoundInChangelog bool
 }
 
 // ToStringCurrentVersion returns package name-version-release

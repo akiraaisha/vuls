@@ -551,8 +551,7 @@ func (o *debian) scanPackageCveIDs(pack models.PackageInfo) ([]DetectedCveID, er
 	case "ubuntu", "raspbian":
 		cmd = fmt.Sprintf(`PAGER=cat apt-get -q=2 changelog %s`, pack.Name)
 	case "debian":
-		//TODO -q option
-		cmd = fmt.Sprintf(`PAGER=cat aptitude changelog %s`, pack.Name)
+		cmd = fmt.Sprintf(`PAGER=cat aptitude -q=2 changelog %s`, pack.Name)
 	}
 	cmd = util.PrependProxyEnv(cmd)
 
